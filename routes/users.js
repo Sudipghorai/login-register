@@ -1,10 +1,8 @@
 const express = require('express');
 const router = express.Router();
-const path = require('path');
-const fs = require('fs');
 const db = require('../db');
 const authMiddleware = require('../middleware/authMiddleware');
-const upload = require('../middleware/upload');
+const imagekit = require('../utils/imagekit');
 require('dotenv').config();
 
 // ✅ GET USER PROFILE
@@ -17,132 +15,168 @@ router.get('/', authMiddleware, (req, res) => {
 
     db.query(query, [req.user.userid], (err, results) => {
         if (err) return res.status(500).json({ message: 'Error fetching user', error: err });
-
         if (results.length === 0) return res.status(404).json({ message: 'User not found' });
-
-        const user = results[0];
-
-        // ✅ Add full image URL if image exists
-        if (user.profile_image) {
-            user.profile_image = `${req.protocol}://${req.get('host')}/uploads/${user.profile_image}`;
-        }
 
         return res.status(200).json({
             message: 'User fetched successfully',
-            user
+            user: results[0]
         });
     });
 });
 
+// ✅ UPLOAD PROFILE IMAGE ONLY
+router.post('/upload-image', authMiddleware, async (req, res) => {
+    if (!req.files || !req.files.profile_image) {
+        return res.status(400).json({ message: 'No image uploaded' });
+    }
+
+    const file = req.files.profile_image;
+
+    // Validate file type
+    const allowedTypes = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp'];
+    if (!allowedTypes.includes(file.mimetype)) {
+        return res.status(400).json({ message: 'Only images allowed (jpeg, jpg, png, webp)' });
+    }
+
+    try {
+        // Get old image to delete
+        const getOldImage = 'SELECT imagekit_file_id FROM users1 WHERE userid = ?';
+        db.query(getOldImage, [req.user.userid], async (err, result) => {
+            if (err) return res.status(500).json({ message: 'Server error', error: err });
+
+            // Delete old image from ImageKit
+            if (result[0] && result[0].imagekit_file_id) {
+                try {
+                    await imagekit.deleteFile(result[0].imagekit_file_id);
+                } catch (deleteErr) {
+                    console.error('Error deleting old image:', deleteErr.message);
+                }
+            }
+
+            // Upload to ImageKit
+            const uploadResponse = await imagekit.upload({
+                file: file.data,
+                fileName: `user_${req.user.userid}_${Date.now()}`,
+                folder: '/coloors/profiles'
+            });
+
+            // Save to DB
+            const updateImage = 'UPDATE users1 SET profile_image = ?, imagekit_file_id = ? WHERE userid = ?';
+            db.query(updateImage, [uploadResponse.url, uploadResponse.fileId, req.user.userid], (err) => {
+                if (err) return res.status(500).json({ message: 'Error saving image', error: err });
+
+                return res.status(200).json({
+                    message: 'Profile image uploaded successfully',
+                    profile_image: uploadResponse.url
+                });
+            });
+        });
+    } catch (err) {
+        return res.status(500).json({ message: 'ImageKit upload failed', error: err.message });
+    }
+});
+
 // ✅ EDIT USER PROFILE (with optional image)
-router.put('/edit', authMiddleware, upload.single('profile_image'), (req, res) => {
+router.put('/edit', authMiddleware, async (req, res) => {
     const { firstname, lastname, email, mobilenumber } = req.body;
 
     if (!firstname || !lastname || !email || !mobilenumber) {
         return res.status(400).json({ message: 'All fields are required' });
     }
 
-    // If new image uploaded, delete old image first
-    if (req.file) {
-        const getOldImage = 'SELECT profile_image FROM users1 WHERE userid = ?';
-        db.query(getOldImage, [req.user.userid], (err, result) => {
-            if (err) console.error('Error fetching old image:', err);
+    try {
+        if (req.files && req.files.profile_image) {
+            const file = req.files.profile_image;
 
-            if (result && result[0] && result[0].profile_image) {
-                const oldImagePath = path.join(__dirname, '../uploads', result[0].profile_image);
-                if (fs.existsSync(oldImagePath)) {
-                    fs.unlinkSync(oldImagePath); // Delete old image from disk
+            // Validate file type
+            const allowedTypes = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp'];
+            if (!allowedTypes.includes(file.mimetype)) {
+                return res.status(400).json({ message: 'Only images allowed (jpeg, jpg, png, webp)' });
+            }
+
+            // Get old image
+            const getOldImage = 'SELECT imagekit_file_id FROM users1 WHERE userid = ?';
+            db.query(getOldImage, [req.user.userid], async (err, result) => {
+                if (err) return res.status(500).json({ message: 'Server error', error: err });
+
+                // Delete old image from ImageKit
+                if (result[0] && result[0].imagekit_file_id) {
+                    try {
+                        await imagekit.deleteFile(result[0].imagekit_file_id);
+                    } catch (deleteErr) {
+                        console.error('Error deleting old image:', deleteErr.message);
+                    }
                 }
-            }
-        });
-    }
 
-    const newImage = req.file ? req.file.filename : null;
+                // Upload new image
+                const uploadResponse = await imagekit.upload({
+                    file: file.data,
+                    fileName: `user_${req.user.userid}_${Date.now()}`,
+                    folder: '/coloors/profiles'
+                });
 
-    const updateQuery = newImage
-        ? `UPDATE users1 SET firstname=?, lastname=?, email=?, mobilenumber=?, profile_image=? WHERE userid=?`
-        : `UPDATE users1 SET firstname=?, lastname=?, email=?, mobilenumber=? WHERE userid=?`;
+                // Update all fields with image
+                const updateQuery = `
+                    UPDATE users1 
+                    SET firstname=?, lastname=?, email=?, mobilenumber=?, profile_image=?, imagekit_file_id=?
+                    WHERE userid=?
+                `;
+                db.query(updateQuery, [firstname, lastname, email, mobilenumber, uploadResponse.url, uploadResponse.fileId, req.user.userid], (err) => {
+                    if (err) return res.status(500).json({ message: 'Error updating user', error: err });
 
-    const params = newImage
-        ? [firstname, lastname, email, mobilenumber, newImage, req.user.userid]
-        : [firstname, lastname, email, mobilenumber, req.user.userid];
-
-    db.query(updateQuery, params, (err, result) => {
-        if (err) return res.status(500).json({ message: 'Error updating user', error: err });
-
-        if (result.affectedRows === 0) return res.status(404).json({ message: 'User not found' });
-
-        // Return updated user
-        const getUser = `SELECT userid, firstname, lastname, email, mobilenumber, profile_image FROM users1 WHERE userid = ?`;
-        db.query(getUser, [req.user.userid], (err, results) => {
-            if (err) return res.status(500).json({ message: 'Error fetching updated user' });
-
-            const user = results[0];
-            if (user.profile_image) {
-                user.profile_image = `${req.protocol}://${req.get('host')}/uploads/${user.profile_image}`;
-            }
-
-            return res.status(200).json({
-                message: 'User updated successfully',
-                user
+                    return res.status(200).json({
+                        message: 'User updated successfully',
+                        user: {
+                            firstname, lastname, email, mobilenumber,
+                            profile_image: uploadResponse.url
+                        }
+                    });
+                });
             });
-        });
-    });
-});
 
-// ✅ UPLOAD PROFILE IMAGE ONLY
-router.post('/upload-image', authMiddleware, upload.single('profile_image'), (req, res) => {
-    if (!req.file) {
-        return res.status(400).json({ message: 'No image uploaded' });
-    }
+        } else {
+            // Update without image
+            const updateQuery = `
+                UPDATE users1 
+                SET firstname=?, lastname=?, email=?, mobilenumber=?
+                WHERE userid=?
+            `;
+            db.query(updateQuery, [firstname, lastname, email, mobilenumber, req.user.userid], (err) => {
+                if (err) return res.status(500).json({ message: 'Error updating user', error: err });
 
-    // Delete old image if exists
-    const getOldImage = 'SELECT profile_image FROM users1 WHERE userid = ?';
-    db.query(getOldImage, [req.user.userid], (err, result) => {
-        if (result && result[0] && result[0].profile_image) {
-            const oldImagePath = path.join(__dirname, '../uploads', result[0].profile_image);
-            if (fs.existsSync(oldImagePath)) {
-                fs.unlinkSync(oldImagePath);
-            }
+                return res.status(200).json({
+                    message: 'User updated successfully',
+                    user: { firstname, lastname, email, mobilenumber }
+                });
+            });
         }
-
-        // Save new image
-        const updateImage = 'UPDATE users1 SET profile_image = ? WHERE userid = ?';
-        db.query(updateImage, [req.file.filename, req.user.userid], (err) => {
-            if (err) return res.status(500).json({ message: 'Error saving image', error: err });
-
-            const imageUrl = `${req.protocol}://${req.get('host')}/uploads/${req.file.filename}`;
-            return res.status(200).json({
-                message: 'Profile image uploaded successfully',
-                profile_image: imageUrl
-            });
-        });
-    });
+    } catch (err) {
+        return res.status(500).json({ message: 'Error updating user', error: err.message });
+    }
 });
 
 // ✅ DELETE PROFILE IMAGE
-router.delete('/delete-image', authMiddleware, (req, res) => {
-    const getImage = 'SELECT profile_image FROM users1 WHERE userid = ?';
-    db.query(getImage, [req.user.userid], (err, result) => {
+router.delete('/delete-image', authMiddleware, async (req, res) => {
+    const getImage = 'SELECT imagekit_file_id FROM users1 WHERE userid = ?';
+    db.query(getImage, [req.user.userid], async (err, result) => {
         if (err) return res.status(500).json({ message: 'Server error', error: err });
 
-        if (!result[0].profile_image) {
+        if (!result[0] || !result[0].imagekit_file_id) {
             return res.status(404).json({ message: 'No profile image found' });
         }
 
-        // Delete from disk
-        const imagePath = path.join(__dirname, '../uploads', result[0].profile_image);
-        if (fs.existsSync(imagePath)) {
-            fs.unlinkSync(imagePath);
+        try {
+            await imagekit.deleteFile(result[0].imagekit_file_id);
+
+            const removeImage = 'UPDATE users1 SET profile_image = NULL, imagekit_file_id = NULL WHERE userid = ?';
+            db.query(removeImage, [req.user.userid], (err) => {
+                if (err) return res.status(500).json({ message: 'Error removing image', error: err });
+
+                return res.status(200).json({ message: 'Profile image deleted successfully' });
+            });
+        } catch (err) {
+            return res.status(500).json({ message: 'Error deleting from ImageKit', error: err.message });
         }
-
-        // Remove from DB
-        const removeImage = 'UPDATE users1 SET profile_image = NULL WHERE userid = ?';
-        db.query(removeImage, [req.user.userid], (err) => {
-            if (err) return res.status(500).json({ message: 'Error removing image', error: err });
-
-            return res.status(200).json({ message: 'Profile image deleted successfully' });
-        });
     });
 });
 

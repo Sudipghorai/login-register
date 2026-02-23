@@ -1,26 +1,25 @@
 const express = require('express');
 const cors = require('cors');
+const fileUpload = require('express-fileupload');
 const app = express();
-const path = require('path');
 require('dotenv').config();
 
-// ✅ CORS Middleware
 app.use(cors({
     origin: '*',
 }));
 
 app.use(express.json());
 
+// ✅ express-fileupload instead of multer
+app.use(fileUpload({
+    limits: { fileSize: 5 * 1024 * 1024 }, // 5MB max
+    abortOnLimit: true
+}));
 
-// ✅ Serve uploaded images statically
-app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
-
-// Routes
 const authRoutes = require('./routes/auth');
 const userRoutes = require('./routes/users');
-
 app.use('/api/auth', authRoutes);
-app.use('/api/users',userRoutes);
+app.use('/api/users', userRoutes);
 
 const PORT = process.env.PORT || 3005;
 app.listen(PORT, () => {
