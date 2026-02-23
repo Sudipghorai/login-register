@@ -5,27 +5,30 @@ POST
 http://localhost:3005/api/auth/register
 
 `Login`
+`Step:1`
 POST
 http://localhost:3005/api/auth/login
+`Step:2`
 POST
 http://localhost:3005/api/auth/send-otp
+`Step:3`
 POST
 http://localhost:3005/api/auth/verify-otp
 
 `Forgot password`
+`Step:1`
 POST
 http://localhost:3005/api/auth/forgot-password
+`Step:2`
 POST
 http://localhost:3005/api/auth/verify-reset-otp
+`Step:3`
 POST
 http://localhost:3005/api/auth/reset-password
 
 `Get all users`
 GET
 http://localhost:3005/api/users/
-
-`Bearer token`:
-eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyaWQiOjMsImVtYWlsIjoic3VkaXBnaG9yYWk3N0BnbWFpbC5jb20iLCJpYXQiOjE3NzE4Mjg1OTgsImV4cCI6MTc3MTkxNDk5OH0.WfoR6q3tv8eeWkhIdihnBPUBIDf8i1PsjalyA8KCAs4
 
 `Image properties`
 POST
